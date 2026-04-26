@@ -9,6 +9,7 @@ from typing import List, Optional
 from . import __version__
 from .openai_compat import codex_failure_to_error, to_chat_completion, to_error
 from .runner import CodexRequest, CodexRunnerError, ask_codex
+from .server import add_server_arguments, config_from_args, serve_forever
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -21,6 +22,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.command == "ask":
         return _handle_ask(args)
+    if args.command == "serve":
+        return _handle_serve(args)
 
     parser.print_help(sys.stderr)
     return 2
@@ -93,6 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Pretty-print JSON output.",
     )
+    serve = subparsers.add_parser(
+        "serve",
+        help="Run an OpenAI-compatible HTTP API backed by Codex CLI.",
+        description="Run an OpenAI-compatible HTTP API backed by Codex CLI.",
+    )
+    add_server_arguments(serve)
     return parser
 
 
@@ -152,6 +161,11 @@ def _print_json(payload: object, pretty: bool) -> None:
             indent=2 if pretty else None,
         )
     )
+
+
+def _handle_serve(args: argparse.Namespace) -> int:
+    serve_forever(config_from_args(args))
+    return 0
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .runner import CodexResponse
 
@@ -40,6 +40,81 @@ def to_chat_completion(
             "total_tokens": 0,
         },
         "system_fingerprint": None,
+    }
+
+
+def to_chat_completion_chunk(
+    content: str,
+    model: Optional[str] = None,
+    completion_id: Optional[str] = None,
+    created: Optional[int] = None,
+) -> Tuple[str, int, List[Dict[str, object]]]:
+    chunk_id = completion_id or _completion_id()
+    chunk_created = created if created is not None else int(time.time())
+    chunk_model = model or DEFAULT_MODEL
+    return (
+        chunk_id,
+        chunk_created,
+        [
+            {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": chunk_created,
+                "model": chunk_model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant"},
+                        "logprobs": None,
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": chunk_created,
+                "model": chunk_model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": content},
+                        "logprobs": None,
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": chunk_created,
+                "model": chunk_model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "logprobs": None,
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        ],
+    )
+
+
+def to_model(model_id: str) -> Dict[str, object]:
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": 0,
+        "owned_by": "codex-json-llm",
+    }
+
+
+def to_model_list(model_id: str) -> Dict[str, object]:
+    return {
+        "object": "list",
+        "data": [to_model(model_id)],
     }
 
 

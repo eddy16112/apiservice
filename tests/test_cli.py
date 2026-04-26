@@ -9,8 +9,16 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from codex_json_cli.cli import main
-from codex_json_cli.openai_compat import to_chat_completion
+from codex_json_cli.openai_compat import to_chat_completion, to_chat_completion_chunk, to_model_list
 from codex_json_cli.runner import CodexRequest, CodexResponse, ask_codex
+from codex_json_cli.server import (
+    ServerConfig,
+    build_request_log_record,
+    handle_chat_completion,
+    is_authorized,
+    messages_to_prompt,
+    write_request_log,
+)
 
 
 class RunnerTests(unittest.TestCase):
@@ -153,6 +161,124 @@ class OpenAICompatTests(unittest.TestCase):
         self.assertEqual(payload["choices"][0]["message"]["content"], "world")
         self.assertEqual(payload["choices"][0]["message"]["refusal"], None)
         self.assertEqual(payload["choices"][0]["message"]["annotations"], [])
+
+
+class ServerTests(unittest.TestCase):
+    def test_chat_completion_handler_returns_openai_json(self):
+        seen_prompts = []
+
+        def fake_ask(request):
+            seen_prompts.append(request.question)
+            return _response(answer="api answer")
+
+        config = ServerConfig(served_model="codex-test")
+        result = handle_chat_completion(
+            {
+                "model": "codex-test",
+                "messages": [
+                    {"role": "system", "content": "Be concise."},
+                    {"role": "user", "content": "Hello"},
+                ],
+            },
+            config,
+            ask_func=fake_ask,
+        )
+
+        self.assertEqual(result.status, 200)
+        self.assertEqual(result.payload["object"], "chat.completion")
+        self.assertEqual(result.payload["model"], "codex-test")
+        self.assertEqual(result.payload["choices"][0]["message"]["content"], "api answer")
+        self.assertEqual(seen_prompts[0], "Conversation:\nsystem: Be concise.\nuser: Hello")
+
+    def test_model_list_matches_openai_shape(self):
+        body = to_model_list("codex-test")
+
+        self.assertEqual(body["object"], "list")
+        self.assertEqual(body["data"][0]["id"], "codex-test")
+
+    def test_auth_checks_bearer_token(self):
+        self.assertTrue(is_authorized(None, None))
+        self.assertFalse(is_authorized(None, "secret"))
+        self.assertFalse(is_authorized("Bearer wrong", "secret"))
+        self.assertTrue(is_authorized("Bearer secret", "secret"))
+
+    def test_streaming_result_can_be_encoded_as_sse_chunks(self):
+        config = ServerConfig()
+        result = handle_chat_completion(
+            {
+                "stream": True,
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            config,
+            ask_func=lambda request: _response(answer="stream answer"),
+        )
+        _chunk_id, _created, chunks = to_chat_completion_chunk(
+            result.stream_content,
+            result.stream_model,
+            completion_id="chatcmpl-test",
+            created=123,
+        )
+
+        self.assertEqual(result.status, 200)
+        self.assertEqual(chunks[0]["object"], "chat.completion.chunk")
+        self.assertEqual(chunks[1]["choices"][0]["delta"]["content"], "stream answer")
+        self.assertEqual(chunks[2]["choices"][0]["finish_reason"], "stop")
+
+    def test_messages_to_prompt_accepts_content_parts(self):
+        prompt = messages_to_prompt(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "first"},
+                        {"type": "text", "text": "second"},
+                    ],
+                }
+            ]
+        )
+
+        self.assertEqual(prompt, "first\nsecond")
+
+    def test_request_log_redacts_auth_and_writes_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "requests.jsonl"
+            record = build_request_log_record(
+                method="POST",
+                path="/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer secret",
+                    "Content-Type": "application/json",
+                },
+                client="127.0.0.1",
+                status=200,
+                duration_seconds=0.1234,
+                body={"model": "codex-cli"},
+            )
+            write_request_log(log_path, record)
+
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+            parsed = json.loads(lines[0])
+
+        self.assertEqual(parsed["method"], "POST")
+        self.assertEqual(parsed["path"], "/v1/chat/completions")
+        self.assertEqual(parsed["status"], 200)
+        self.assertEqual(parsed["body"]["model"], "codex-cli")
+        self.assertIn("Content-Type", parsed["headers"])
+        self.assertNotIn("Authorization", parsed["headers"])
+
+
+def _response(answer="ok"):
+    return CodexResponse(
+        ok=True,
+        question="hello",
+        answer=answer,
+        exit_code=0,
+        duration_seconds=1.0,
+        cwd="/tmp",
+        command=["codex"],
+        stdout="",
+        stderr="",
+    )
 
 
 if __name__ == "__main__":
