@@ -10,6 +10,16 @@ from . import __version__
 from .openai_compat import codex_failure_to_error, to_chat_completion, to_error
 from .runner import CodexRequest, CodexRunnerError, ask_codex
 from .server import add_server_arguments, config_from_args, serve_forever
+from .telegram_bridge import (
+    add_bridge_arguments as add_telegram_arguments,
+    config_from_args as telegram_config_from_args,
+    poll_forever as telegram_poll_forever,
+)
+from .whatsapp_bridge import (
+    add_bridge_arguments,
+    config_from_args as whatsapp_config_from_args,
+    serve_forever as whatsapp_serve_forever,
+)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -24,6 +34,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return _handle_ask(args)
     if args.command == "serve":
         return _handle_serve(args)
+    if args.command == "whatsapp":
+        return _handle_whatsapp(args)
+    if args.command == "telegram":
+        return _handle_telegram(args)
 
     parser.print_help(sys.stderr)
     return 2
@@ -92,6 +106,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Abort Codex after this many seconds.",
     )
     ask.add_argument(
+        "--session",
+        help="Stable session key. Reuses a Codex CLI session for follow-up prompts.",
+    )
+    ask.add_argument(
         "--pretty",
         action="store_true",
         help="Pretty-print JSON output.",
@@ -102,6 +120,18 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run an OpenAI-compatible HTTP API backed by Codex CLI.",
     )
     add_server_arguments(serve)
+    whatsapp = subparsers.add_parser(
+        "whatsapp",
+        help="Run a WhatsApp Cloud API webhook bridge backed by llm serve.",
+        description="Run a WhatsApp Cloud API webhook bridge backed by llm serve.",
+    )
+    add_bridge_arguments(whatsapp)
+    telegram = subparsers.add_parser(
+        "telegram",
+        help="Run a Telegram Bot API bridge backed by llm serve.",
+        description="Run a Telegram Bot API bridge backed by llm serve.",
+    )
+    add_telegram_arguments(telegram)
     return parser
 
 
@@ -118,6 +148,7 @@ def _handle_ask(args: argparse.Namespace) -> int:
             sandbox=args.sandbox,
             timeout=args.timeout,
             extra_config=args.config or [],
+            session_key=args.session,
         )
         response = ask_codex(request)
         if response.ok:
@@ -165,6 +196,24 @@ def _print_json(payload: object, pretty: bool) -> None:
 
 def _handle_serve(args: argparse.Namespace) -> int:
     serve_forever(config_from_args(args))
+    return 0
+
+
+def _handle_whatsapp(args: argparse.Namespace) -> int:
+    config = whatsapp_config_from_args(args)
+    if not config.verify_token:
+        print("missing --verify-token or WHATSAPP_VERIFY_TOKEN", file=sys.stderr)
+        return 2
+    whatsapp_serve_forever(config)
+    return 0
+
+
+def _handle_telegram(args: argparse.Namespace) -> int:
+    config = telegram_config_from_args(args)
+    if not config.bot_token:
+        print("missing --bot-token or TELEGRAM_BOT_TOKEN", file=sys.stderr)
+        return 2
+    telegram_poll_forever(config)
     return 0
 
 

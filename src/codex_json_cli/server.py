@@ -27,12 +27,13 @@ from .runner import CodexRequest, CodexRunnerError, ask_codex
 
 
 MAX_BODY_BYTES = 1_000_000
+DEFAULT_REQUEST_LOG = Path("logs") / "requests.jsonl"
 
 
 @dataclass(frozen=True)
 class ServerConfig:
     host: str = "127.0.0.1"
-    port: int = 8000
+    port: int = 8081
     cwd: Path = Path(".")
     codex_bin: str = "codex"
     codex_model: Optional[str] = None
@@ -42,7 +43,8 @@ class ServerConfig:
     extra_config: List[str] = field(default_factory=list)
     served_model: str = DEFAULT_MODEL
     api_key: Optional[str] = None
-    request_log: Optional[Path] = None
+    request_log: Optional[Path] = DEFAULT_REQUEST_LOG
+    session_prefix: str = "api"
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind.")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind.")
+    parser.add_argument("--port", type=int, default=8081, help="Port to bind.")
     parser.add_argument(
         "--cwd",
         default=".",
@@ -125,8 +127,18 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--request-log",
-        default=os.environ.get("CODEX_JSON_LLM_REQUEST_LOG"),
-        help="Optional JSONL file path for request logs. Use '-' to write to stdout.",
+        default=os.environ.get("CODEX_JSON_LLM_REQUEST_LOG", str(DEFAULT_REQUEST_LOG)),
+        help="JSONL file path for request logs. Defaults to logs/requests.jsonl. Use '-' to write to stdout.",
+    )
+    parser.add_argument(
+        "--no-request-log",
+        action="store_true",
+        help="Disable request logging.",
+    )
+    parser.add_argument(
+        "--session-prefix",
+        default=os.environ.get("CODEX_JSON_LLM_SESSION_PREFIX", "api"),
+        help="Prefix for session keys accepted from request metadata.",
     )
 
 
@@ -143,11 +155,17 @@ def config_from_args(args: argparse.Namespace) -> ServerConfig:
         extra_config=args.config or [],
         served_model=args.served_model,
         api_key=args.api_key,
-        request_log=Path(args.request_log) if args.request_log else None,
+        request_log=None
+        if getattr(args, "no_request_log", False)
+        else Path(args.request_log)
+        if args.request_log
+        else None,
+        session_prefix=args.session_prefix,
     )
 
 
 def serve_forever(config: ServerConfig) -> None:
+    reset_request_log(config.request_log)
     handler = make_handler(config)
     server = ThreadingHTTPServer((config.host, config.port), handler)
     url = f"http://{config.host}:{server.server_port}"
@@ -161,6 +179,12 @@ def serve_forever(config: ServerConfig) -> None:
         print("\nShutting down.", flush=True)
     finally:
         server.server_close()
+
+
+def reset_request_log(request_log: Optional[Path]) -> None:
+    if not request_log or str(request_log) == "-":
+        return
+    request_log.unlink(missing_ok=True)
 
 
 def make_handler(
@@ -439,6 +463,7 @@ def handle_chat_completion(
         sandbox=config.sandbox,
         timeout=config.timeout,
         extra_config=config.extra_config,
+        session_key=extract_session_key(body, config.session_prefix),
     )
 
     try:
@@ -476,6 +501,24 @@ def is_authorized(authorization_header: Optional[str], api_key: Optional[str]) -
     if not authorization_header or not authorization_header.startswith(prefix):
         return False
     return hmac.compare_digest(authorization_header[len(prefix) :], api_key)
+
+
+def extract_session_key(body: Dict[str, object], prefix: str) -> Optional[str]:
+    metadata = body.get("metadata")
+    session_id: Optional[str] = None
+    if isinstance(metadata, dict):
+        value = metadata.get("session_id") or metadata.get("codex_session")
+        if isinstance(value, str):
+            session_id = value
+    if session_id is None:
+        value = body.get("session_id")
+        if isinstance(value, str):
+            session_id = value
+    if not session_id:
+        return None
+    if ":" in session_id:
+        return session_id
+    return f"{prefix}:{session_id}"
 
 
 def messages_to_prompt(messages: object) -> str:
